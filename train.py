@@ -30,7 +30,7 @@ def train_seed(seed):
     from data import label2id, id2label, num_labels
 
     seed_model = BertForTokenClassification.from_pretrained(
-        "bert-large-cased",
+        "bert-base-cased",
         num_labels=num_labels,
         id2label=id2label,
         label2id=label2id
