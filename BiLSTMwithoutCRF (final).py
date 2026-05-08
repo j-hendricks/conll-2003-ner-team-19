@@ -7,7 +7,6 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils import clip_grad_norm_
 from collections import Counter
 from datasets import DatasetDict, load_dataset
-from torchcrf import CRF
 from seqeval.metrics import f1_score, classification_report
 
 
@@ -38,7 +37,11 @@ def set_seed(seed):
 BASE = "https://huggingface.co/datasets/conll2003/resolve/refs%2Fconvert%2Fparquet/conll2003"
 
 dataset = DatasetDict({
-    split: load_dataset("parquet", data_files={split: f"{BASE}/{split}/0000.parquet"}, split=split)
+    split: load_dataset(
+        "parquet",
+        data_files={split: f"{BASE}/{split}/0000.parquet"},
+        split=split
+    )
     for split in ["train", "validation", "test"]
 })
 
@@ -116,13 +119,17 @@ def load_glove_vocab(glove_path):
         set: Set of words found in GloVe.
     """
     glove_words = set()
+
     with open(glove_path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.rstrip().split(" ")
+
             if len(parts) < 10:
                 continue
+
             word = parts[0]
             glove_words.add(word)
+
     return glove_words
 
 
@@ -152,16 +159,22 @@ def build_word_vocab(train_dataset, dev_dataset, test_dataset, glove_words, min_
         for token in ex["tokens"]:
             counter[normalize_token(token)] += 1
 
-    vocab = {PAD_TOKEN: PAD_IDX, UNK_TOKEN: UNK_IDX}
+    vocab = {
+        PAD_TOKEN: PAD_IDX,
+        UNK_TOKEN: UNK_IDX
+    }
 
     for word, freq in counter.items():
         if freq >= min_freq:
             vocab[word] = len(vocab)
 
+    # Add dev/test words only if GloVe has them.
+    # This improves evaluation coverage without learning labels from dev/test.
     for split_dataset in [dev_dataset, test_dataset]:
         for ex in split_dataset:
             for token in ex["tokens"]:
                 word = normalize_token(token)
+
                 if word not in vocab and word in glove_words:
                     vocab[word] = len(vocab)
 
@@ -178,12 +191,17 @@ def build_char_vocab(hf_dataset):
     Returns:
         dict: Mapping from character to index.
     """
-    vocab = {PAD_TOKEN: PAD_IDX, UNK_TOKEN: UNK_IDX}
+    vocab = {
+        PAD_TOKEN: PAD_IDX,
+        UNK_TOKEN: UNK_IDX
+    }
+
     for ex in hf_dataset:
         for token in ex["tokens"]:
             for ch in token:
                 if ch not in vocab:
                     vocab[ch] = len(vocab)
+
     return vocab
 
 
@@ -225,10 +243,16 @@ def load_glove_embeddings(glove_path, word_vocab, emb_dim=300):
     Returns:
         torch.Tensor: Embedding matrix of shape (vocab_size, emb_dim).
     """
-    embeddings = np.random.uniform(-0.25, 0.25, (len(word_vocab), emb_dim)).astype(np.float32)
+    embeddings = np.random.uniform(
+        -0.25,
+        0.25,
+        (len(word_vocab), emb_dim)
+    ).astype(np.float32)
+
     embeddings[PAD_IDX] = np.zeros(emb_dim, dtype=np.float32)
 
     found = 0
+
     with open(glove_path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.rstrip().split(" ")
@@ -300,9 +324,20 @@ class CoNLLDataset(Dataset):
         tokens = ex["tokens"]
         tags = ex["ner_tags"]
 
-        word_ids = [self.word_vocab.get(normalize_token(tok), UNK_IDX) for tok in tokens]
-        char_ids = [[self.char_vocab.get(ch, UNK_IDX) for ch in tok] for tok in tokens]
-        cap_ids = [get_cap_feature(tok) for tok in tokens]
+        word_ids = [
+            self.word_vocab.get(normalize_token(tok), UNK_IDX)
+            for tok in tokens
+        ]
+
+        char_ids = [
+            [self.char_vocab.get(ch, UNK_IDX) for ch in tok]
+            for tok in tokens
+        ]
+
+        cap_ids = [
+            get_cap_feature(tok)
+            for tok in tokens
+        ]
 
         return {
             "tokens": tokens,
@@ -339,14 +374,45 @@ def collate_fn(batch):
         dict: Batched tensors ready for model input.
     """
     batch_size = len(batch)
-    max_seq_len = max(len(item["word_ids"]) for item in batch)
-    max_word_len = max(len(chars) for item in batch for chars in item["char_ids"])
 
-    word_ids = torch.full((batch_size, max_seq_len), PAD_IDX, dtype=torch.long)
-    char_ids = torch.full((batch_size, max_seq_len, max_word_len), PAD_IDX, dtype=torch.long)
-    cap_ids = torch.zeros((batch_size, max_seq_len), dtype=torch.long)
-    tags = torch.full((batch_size, max_seq_len), 0, dtype=torch.long)
-    mask = torch.zeros((batch_size, max_seq_len), dtype=torch.bool)
+    max_seq_len = max(
+        len(item["word_ids"])
+        for item in batch
+    )
+
+    max_word_len = max(
+        len(chars)
+        for item in batch
+        for chars in item["char_ids"]
+    )
+
+    word_ids = torch.full(
+        (batch_size, max_seq_len),
+        PAD_IDX,
+        dtype=torch.long
+    )
+
+    char_ids = torch.full(
+        (batch_size, max_seq_len, max_word_len),
+        PAD_IDX,
+        dtype=torch.long
+    )
+
+    cap_ids = torch.zeros(
+        (batch_size, max_seq_len),
+        dtype=torch.long
+    )
+
+    tags = torch.full(
+        (batch_size, max_seq_len),
+        0,
+        dtype=torch.long
+    )
+
+    mask = torch.zeros(
+        (batch_size, max_seq_len),
+        dtype=torch.bool
+    )
 
     for i, item in enumerate(batch):
         seq_len = len(item["word_ids"])
@@ -432,6 +498,8 @@ class CharBiLSTM(nn.Module):
 
         _, (h_n, _) = self.char_lstm(packed)
 
+        # h_n[0] is final forward hidden state.
+        # h_n[1] is final backward hidden state.
         char_rep = torch.cat([h_n[0], h_n[1]], dim=-1)
         char_rep = char_rep.view(B, S, -1)
 
@@ -439,18 +507,20 @@ class CharBiLSTM(nn.Module):
 
 
 # =========================
-# 13. BiLSTM-CRF model
+# 13. Ablation model: BiLSTM without CRF
 # =========================
-class BiLSTMCRF(nn.Module):
+class BiLSTMSoftmax(nn.Module):
     """
-    BiLSTM-CRF model for Named Entity Recognition.
+    BiLSTM-Softmax ablation model for Named Entity Recognition.
 
-    Combines:
-    - pretrained word embeddings
+    This model keeps the same encoder as the full BiLSTM-CRF model:
+    - pretrained GloVe word embeddings
     - character BiLSTM representations
     - capitalization embeddings
     - sentence-level BiLSTM
-    - CRF decoding
+
+    The only change is that the CRF layer is removed and replaced
+    with independent token-level softmax predictions.
     """
 
     def __init__(
@@ -470,12 +540,12 @@ class BiLSTMCRF(nn.Module):
         freeze_word_embeddings=False
     ):
         """
-        Initialize the BiLSTM-CRF architecture.
+        Initialize the BiLSTM-Softmax ablation model.
 
         Args:
             word_vocab_size (int): Number of unique words.
             char_vocab_size (int): Number of unique characters.
-            tagset_size (int): Number of output tags.
+            tagset_size (int): Number of output NER tags.
             word_emb_dim (int): Word embedding size.
             char_emb_dim (int): Character embedding size.
             char_hidden_dim (int): Character hidden size per direction.
@@ -484,7 +554,7 @@ class BiLSTMCRF(nn.Module):
             lstm_hidden_dim (int): Sentence BiLSTM hidden size per direction.
             lstm_layers (int): Number of sentence BiLSTM layers.
             dropout (float): Dropout probability.
-            pretrained_word_embeddings (torch.Tensor, optional): GloVe matrix.
+            pretrained_word_embeddings (torch.Tensor, optional): GloVe embedding matrix.
             freeze_word_embeddings (bool): Whether to freeze word embeddings.
         """
         super().__init__()
@@ -530,11 +600,13 @@ class BiLSTMCRF(nn.Module):
         self.ff = nn.Linear(lstm_hidden_dim * 2, lstm_hidden_dim * 2)
         self.act = nn.Tanh()
         self.hidden2tag = nn.Linear(lstm_hidden_dim * 2, tagset_size)
-        self.crf = CRF(num_tags=tagset_size, batch_first=True)
+
+        # Padding positions are ignored by setting their label to -100.
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     def get_emissions(self, word_ids, char_ids, cap_ids, mask):
         """
-        Compute emission scores for each token.
+        Compute token-level tag scores.
 
         Args:
             word_ids (torch.Tensor): Shape (B, S).
@@ -553,6 +625,7 @@ class BiLSTMCRF(nn.Module):
         x = self.input_dropout(x)
 
         lengths = mask.sum(dim=1).cpu()
+
         packed = nn.utils.rnn.pack_padded_sequence(
             x,
             lengths,
@@ -561,6 +634,7 @@ class BiLSTMCRF(nn.Module):
         )
 
         packed_out, _ = self.bilstm(packed)
+
         lstm_out, _ = nn.utils.rnn.pad_packed_sequence(
             packed_out,
             batch_first=True
@@ -570,11 +644,14 @@ class BiLSTMCRF(nn.Module):
         h = self.ff(lstm_out)
         h = self.act(h)
         emissions = self.hidden2tag(h)
+
         return emissions
 
     def forward(self, word_ids, char_ids, cap_ids, tags, mask):
         """
-        Compute the CRF negative log-likelihood loss.
+        Compute token-level cross-entropy loss.
+
+        Unlike CRF, this treats each token prediction independently.
 
         Args:
             word_ids (torch.Tensor): Word ID tensor.
@@ -587,12 +664,20 @@ class BiLSTMCRF(nn.Module):
             torch.Tensor: Scalar loss value.
         """
         emissions = self.get_emissions(word_ids, char_ids, cap_ids, mask)
-        log_likelihood = self.crf(emissions, tags, mask=mask, reduction="mean")
-        return -log_likelihood
+
+        labels = tags.clone()
+        labels[~mask] = -100
+
+        loss = self.loss_fn(
+            emissions.view(-1, emissions.size(-1)),
+            labels.view(-1)
+        )
+
+        return loss
 
     def decode(self, word_ids, char_ids, cap_ids, mask):
         """
-        Decode the best tag sequence using the CRF.
+        Decode predictions using argmax over token-level scores.
 
         Args:
             word_ids (torch.Tensor): Word ID tensor.
@@ -604,18 +689,202 @@ class BiLSTMCRF(nn.Module):
             list: Predicted tag sequences.
         """
         emissions = self.get_emissions(word_ids, char_ids, cap_ids, mask)
-        return self.crf.decode(emissions, mask=mask)
+        preds = emissions.argmax(dim=-1)
+
+        pred_paths = []
+
+        for i in range(preds.size(0)):
+            seq_len = int(mask[i].sum().item())
+            pred_paths.append(preds[i, :seq_len].tolist())
+
+        return pred_paths
 
 
 # =========================
-# 14. Evaluation
+# 14. Error taxonomy helpers
+# =========================
+def extract_entities(tags):
+    """
+    Convert a BIO tag sequence into entity spans.
+
+    Each entity is represented as:
+        (start_index, end_index, entity_type)
+
+    The end index is exclusive.
+
+    Example:
+        ["B-PER", "I-PER", "O", "B-LOC"]
+        -> [(0, 2, "PER"), (3, 4, "LOC")]
+
+    Args:
+        tags (list[str]): BIO tag sequence.
+
+    Returns:
+        list[tuple]: Entity spans.
+    """
+    entities = []
+    start = None
+    ent_type = None
+
+    for i, tag in enumerate(tags):
+        if tag == "O":
+            if start is not None:
+                entities.append((start, i, ent_type))
+                start = None
+                ent_type = None
+            continue
+
+        if "-" not in tag:
+            continue
+
+        prefix, entity_type = tag.split("-", 1)
+
+        if prefix == "B":
+            if start is not None:
+                entities.append((start, i, ent_type))
+
+            start = i
+            ent_type = entity_type
+
+        elif prefix == "I":
+            if start is None:
+                start = i
+                ent_type = entity_type
+            elif entity_type != ent_type:
+                entities.append((start, i, ent_type))
+                start = i
+                ent_type = entity_type
+
+    if start is not None:
+        entities.append((start, len(tags), ent_type))
+
+    return entities
+
+
+def entity_overlap(ent1, ent2):
+    """
+    Check whether two entity spans overlap.
+
+    Args:
+        ent1 (tuple): (start, end, type)
+        ent2 (tuple): (start, end, type)
+
+    Returns:
+        bool: True if the spans overlap.
+    """
+    start1, end1, _ = ent1
+    start2, end2, _ = ent2
+
+    return start1 < end2 and start2 < end1
+
+
+def compute_error_taxonomy(all_true, all_pred):
+    """
+    Compute NER error taxonomy counts.
+
+    Error categories:
+        correct_type_wrong_boundary:
+            Prediction overlaps a gold entity and has the correct entity type,
+            but the span boundaries are wrong.
+
+        correct_boundary_wrong_type:
+            Prediction has the same span as a gold entity,
+            but the entity type is wrong.
+
+        missed_entity:
+            A gold entity is not matched by any prediction.
+
+        hallucinated_entity:
+            A predicted entity is not matched by any gold entity.
+
+    Args:
+        all_true (list[list[str]]): Gold BIO tag sequences.
+        all_pred (list[list[str]]): Predicted BIO tag sequences.
+
+    Returns:
+        dict: Error counts by category.
+    """
+    errors = {
+        "correct_type_wrong_boundary": 0,
+        "correct_boundary_wrong_type": 0,
+        "missed_entity": 0,
+        "hallucinated_entity": 0
+    }
+
+    for true_tags, pred_tags in zip(all_true, all_pred):
+        gold_entities = extract_entities(true_tags)
+        pred_entities = extract_entities(pred_tags)
+
+        matched_gold = set()
+        matched_pred = set()
+
+        # Exact matches are correct and should not be counted as errors.
+        for gi, gold in enumerate(gold_entities):
+            for pi, pred in enumerate(pred_entities):
+                if gold == pred:
+                    matched_gold.add(gi)
+                    matched_pred.add(pi)
+
+        # Correct boundary but wrong type.
+        for gi, gold in enumerate(gold_entities):
+            if gi in matched_gold:
+                continue
+
+            g_start, g_end, g_type = gold
+
+            for pi, pred in enumerate(pred_entities):
+                if pi in matched_pred:
+                    continue
+
+                p_start, p_end, p_type = pred
+
+                if g_start == p_start and g_end == p_end and g_type != p_type:
+                    errors["correct_boundary_wrong_type"] += 1
+                    matched_gold.add(gi)
+                    matched_pred.add(pi)
+                    break
+
+        # Correct type but wrong boundary.
+        for gi, gold in enumerate(gold_entities):
+            if gi in matched_gold:
+                continue
+
+            g_start, g_end, g_type = gold
+
+            for pi, pred in enumerate(pred_entities):
+                if pi in matched_pred:
+                    continue
+
+                p_start, p_end, p_type = pred
+
+                if g_type == p_type and entity_overlap(gold, pred):
+                    errors["correct_type_wrong_boundary"] += 1
+                    matched_gold.add(gi)
+                    matched_pred.add(pi)
+                    break
+
+        # Remaining unmatched gold entities are missed.
+        for gi in range(len(gold_entities)):
+            if gi not in matched_gold:
+                errors["missed_entity"] += 1
+
+        # Remaining unmatched predictions are hallucinated.
+        for pi in range(len(pred_entities)):
+            if pi not in matched_pred:
+                errors["hallucinated_entity"] += 1
+
+    return errors
+
+
+# =========================
+# 15. Evaluation
 # =========================
 def evaluate(model, data_loader, id_to_tag, device):
     """
     Evaluate the model on a dataset split.
 
-    Uses seqeval to compute entity-level F1 and produce
-    a detailed classification report.
+    Uses seqeval to compute entity-level F1 and produces
+    an error taxonomy for model analysis.
 
     Args:
         model: Trained model.
@@ -624,9 +893,10 @@ def evaluate(model, data_loader, id_to_tag, device):
         device: CPU or GPU device.
 
     Returns:
-        tuple: (f1_score, classification_report)
+        tuple: (f1_score, classification_report, error_taxonomy)
     """
     model.eval()
+
     all_true = []
     all_pred = []
 
@@ -643,45 +913,50 @@ def evaluate(model, data_loader, id_to_tag, device):
             for i in range(word_ids.size(0)):
                 seq_len = int(mask[i].sum().item())
 
-                true_seq = [id_to_tag[int(t.item())] for t in tags[i, :seq_len]]
-                pred_seq = [id_to_tag[int(t)] for t in pred_paths[i]]
+                true_seq = [
+                    id_to_tag[int(t.item())]
+                    for t in tags[i, :seq_len]
+                ]
+
+                pred_seq = [
+                    id_to_tag[int(t)]
+                    for t in pred_paths[i]
+                ]
 
                 all_true.append(true_seq)
                 all_pred.append(pred_seq)
 
     f1 = f1_score(all_true, all_pred)
     report = classification_report(all_true, all_pred)
-    return f1, report
+    errors = compute_error_taxonomy(all_true, all_pred)
+
+    return f1, report, errors
 
 
 # =========================
-# 15. Device
+# 16. Device
 # =========================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
 # =========================
-# 16. Run one full experiment
+# 17. Run BiLSTM-Softmax ablation
 # =========================
-def run_experiment(seed):
+def run_softmax_ablation(seed):
     """
-    Run one full training and evaluation experiment for a single seed.
+    Run the BiLSTM without CRF ablation for one random seed.
 
-    This includes:
-    - setting the random seed
-    - building fresh DataLoaders
-    - initializing the model
-    - training with early stopping on dev F1
-    - final evaluation on the test set
+    This model keeps the same encoder as the full model but replaces
+    the CRF with token-level softmax classification.
 
     Args:
         seed (int): Random seed.
 
     Returns:
-        tuple: (best_dev_f1, test_f1)
+        tuple: (best_dev_f1, test_f1, test_errors)
     """
-    print(f"\nRunning with seed {seed}")
+    print(f"\nRunning BiLSTM-Softmax ablation with seed {seed}")
     set_seed(seed)
 
     train_loader = DataLoader(
@@ -705,7 +980,7 @@ def run_experiment(seed):
         collate_fn=collate_fn
     )
 
-    model = BiLSTMCRF(
+    model = BiLSTMSoftmax(
         word_vocab_size=len(word_vocab),
         char_vocab_size=len(char_vocab),
         tagset_size=tagset_size,
@@ -725,6 +1000,7 @@ def run_experiment(seed):
 
     best_dev_f1 = 0.0
     best_state = None
+
     patience = 10
     patience_counter = 0
     num_epochs = 100
@@ -741,25 +1017,48 @@ def run_experiment(seed):
             mask = batch["mask"].to(device)
 
             optimizer.zero_grad()
-            loss = model(word_ids, char_ids, cap_ids, tags, mask)
+
+            loss = model(
+                word_ids,
+                char_ids,
+                cap_ids,
+                tags,
+                mask
+            )
+
             loss.backward()
 
-            clip_grad_norm_(model.parameters(), max_norm=5.0)
+            clip_grad_norm_(
+                model.parameters(),
+                max_norm=5.0
+            )
+
             optimizer.step()
 
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        dev_f1, _ = evaluate(model, val_loader, id_to_tag, device)
 
-        print(f"Seed {seed} | Epoch {epoch:02d} | loss={avg_loss:.4f} | dev_f1={dev_f1:.4f}")
+        dev_f1, _, _ = evaluate(
+            model,
+            val_loader,
+            id_to_tag,
+            device
+        )
+
+        print(
+            f"Softmax Ablation | Seed {seed} | Epoch {epoch:02d} | "
+            f"loss={avg_loss:.4f} | dev_f1={dev_f1:.4f}"
+        )
 
         if dev_f1 > best_dev_f1:
             best_dev_f1 = dev_f1
+
             best_state = {
                 k: v.detach().cpu().clone()
                 for k, v in model.state_dict().items()
             }
+
             patience_counter = 0
             print("New best model.")
         else:
@@ -772,42 +1071,69 @@ def run_experiment(seed):
 
     model.load_state_dict(best_state)
 
-    test_f1, test_report = evaluate(model, test_loader, id_to_tag, device)
+    test_f1, test_report, test_errors = evaluate(
+        model,
+        test_loader,
+        id_to_tag,
+        device
+    )
 
-    print(f"\nSeed {seed} results:")
+    print(f"\nBiLSTM-Softmax ablation | Seed {seed} results:")
     print(f"Best dev F1: {best_dev_f1:.4f}")
     print(f"Test F1: {test_f1:.4f}")
     print(test_report)
 
-    return best_dev_f1, test_f1
+    print("Error taxonomy:")
+    for error_type, count in test_errors.items():
+        print(f"{error_type}: {count}")
+
+    return best_dev_f1, test_f1, test_errors
 
 
 # =========================
-# 17. Run all 3 seeds
+# 18. Run softmax ablation across 3 seeds
 # =========================
 seeds = [42, 123, 456]
 
 dev_scores = []
 test_scores = []
 
+error_totals = {
+    "correct_type_wrong_boundary": [],
+    "correct_boundary_wrong_type": [],
+    "missed_entity": [],
+    "hallucinated_entity": []
+}
+
 for seed in seeds:
-    dev_f1, test_f1 = run_experiment(seed)
+    dev_f1, test_f1, test_errors = run_softmax_ablation(seed)
+
     dev_scores.append(dev_f1)
     test_scores.append(test_f1)
 
+    for error_type in error_totals:
+        error_totals[error_type].append(test_errors[error_type])
 
-# =========================
-# 18. Mean ± std
-# =========================
+
 dev_mean = np.mean(dev_scores)
 dev_std = np.std(dev_scores)
 
 test_mean = np.mean(test_scores)
 test_std = np.std(test_scores)
 
+
+# =========================
+# 19. Final results
+# =========================
 print("\n=========================")
-print("Final Results Across Seeds")
+print("BiLSTM-Softmax Ablation Results Across Seeds")
 print("=========================")
 print(f"Seeds: {seeds}")
 print(f"Dev F1:  {dev_mean:.4f} ± {dev_std:.4f}")
 print(f"Test F1: {test_mean:.4f} ± {test_std:.4f}")
+
+print("\nError Taxonomy Across Seeds")
+for error_type, counts in error_totals.items():
+    mean_count = np.mean(counts)
+    std_count = np.std(counts)
+    print(f"{error_type}: {mean_count:.2f} ± {std_count:.2f}")
